@@ -13,9 +13,11 @@ These are functions you can call in your javascript code:
 
     // disable stacktrace merging
     Sentry.config("___DSN___", {
-      deactivateStacktraceMerging: true, // default: false | Deactivates the stacktrace merging feature
+      deactivateStacktraceMerging: false, // default: true | Deactivates the stacktrace merging feature
       logLevel: SentryLog.Debug, // default SentryLog.None | Possible values:  .None, .Error, .Debug, .Verbose
-      disableNativeIntegration: false // default: false | Deactivates the native integration and only uses raven-js
+      disableNativeIntegration: false, // default: false | Deactivates the native integration and only uses raven-js
+      handlePromiseRejection: true // default: true | Handle unhandled promise rejections
+      // sampleRate: 0.5 // default: 1.0 | Only set this if you don't want to send every event so e.g.: 0.5 will send 50% of all events
       // These two options will only be considered if stacktrace merging is active
       // Here you can add modules that should be ignored or exclude modules
       // that should no longer be ignored from stacktrace merging
@@ -31,6 +33,13 @@ These are functions you can call in your javascript code:
       // Sentry.lastEventId(); -> returns the last event_id after the first successfully sent event
       // Sentry.lastException(); -> returns the last event after the first successfully sent event
     });
+
+    Sentry.setShouldSendCallback((event) => {
+      return true; // if return false, event will not be sent
+    });
+
+    // Sentry.lastException(); // Will return the last sent error event
+    // Sentry.lastEventId(); // Will return the last event id
 
     // export an extra context
     Sentry.setExtraContext({
@@ -67,7 +76,7 @@ These are functions you can call in your javascript code:
       logger: 'my.module'
     });
 
-    // capture an exception
+    // capture a breadcrumb
     Sentry.captureBreadcrumb({
       message: 'Item added to shopping cart',
       category: 'action',

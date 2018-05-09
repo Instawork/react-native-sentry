@@ -19,10 +19,14 @@ import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.bridge.WritableNativeMap;
 
 import java.util.ArrayDeque;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Random;
+import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.regex.Matcher;
@@ -35,6 +39,7 @@ import io.sentry.event.Breadcrumb;
 import io.sentry.event.BreadcrumbBuilder;
 import io.sentry.event.Event;
 import io.sentry.event.EventBuilder;
+import io.sentry.event.Sdk;
 import io.sentry.event.User;
 import io.sentry.event.UserBuilder;
 import io.sentry.event.helper.ShouldSendEventCallback;
@@ -47,6 +52,8 @@ import io.sentry.event.interfaces.UserInterface;
 public class RNSentryModule extends ReactContextBaseJavaModule {
 
     private static final Pattern mJsModuleIdPattern = Pattern.compile("(?:^|[/\\\\])(\\d+\\.js)$");
+    private static final String versionString = "0.36.0";
+    private static final String sdkName = "sentry-react-native";
 
     private final ReactApplicationContext reactContext;
     private final ReactApplication reactApplication;
@@ -83,12 +90,21 @@ public class RNSentryModule extends ReactContextBaseJavaModule {
     }
 
     @ReactMethod
-    public void startWithDsnString(String dsnString) {
+    public void startWithDsnString(String dsnString, final ReadableMap options, Promise promise) {
         if (sentryClient != null) {
             logger.info(String.format("Already started, use existing client '%s'", dsnString));
+            promise.resolve(false);
             return;
         }
-        sentryClient = Sentry.init(dsnString, new AndroidSentryClientFactory(this.getReactApplicationContext()));
+
+        try {
+            sentryClient = Sentry.init(dsnString, new AndroidSentryClientFactory(this.getReactApplicationContext()));
+        } catch (Exception e) {
+            logger.info(String.format("Catching on startWithDsnString, calling callback" + e.getMessage()));
+            promise.reject("SentryError", "Error during init", e);
+            return;
+        }
+
         androidHelper = new AndroidEventBuilderHelper(this.getReactApplicationContext());
         sentryClient.addEventSendCallback(new EventSendCallback() {
             @Override
@@ -101,6 +117,16 @@ public class RNSentryModule extends ReactContextBaseJavaModule {
                 WritableMap params = Arguments.createMap();
                 params.putString("event_id", event.getId().toString());
                 params.putString("level", event.getLevel().toString().toLowerCase());
+                params.putString("message", event.getMessage());
+                params.putString("release", event.getRelease());
+                params.putString("dist", event.getDist());
+                params.putMap("extra", MapUtil.toWritableMap(event.getExtra()));
+                params.putMap("tags", MapUtil.toWritableMap(Collections.<String, Object>unmodifiableMap(event.getTags())));
+                if (event.getSentryInterfaces().containsKey(ExceptionInterface.EXCEPTION_INTERFACE)) {
+                    ExceptionInterface exceptionInterface = ((ExceptionInterface)event.getSentryInterfaces().get(ExceptionInterface.EXCEPTION_INTERFACE));
+                    params.putString("message", exceptionInterface.getExceptions().getFirst().getExceptionMessage());
+                }
+                RNSentryEventEmitter.sendEvent(reactContext, RNSentryEventEmitter.SENTRY_EVENT_STORED, new WritableNativeMap());
                 RNSentryEventEmitter.sendEvent(reactContext, RNSentryEventEmitter.SENTRY_EVENT_SENT_SUCCESSFULLY, params);
             }
         });
@@ -115,10 +141,17 @@ public class RNSentryModule extends ReactContextBaseJavaModule {
                         return false;
                     }
                 }
+                // Since we set shouldSendEvent for react-native we need to duplicate the code for sampling here
+                // I know you could add multiple shouldSendCallbacks but I want to be consistent with ios
+                if (options.hasKey("sampleRate")) {
+                    double randomDouble = new Random().nextDouble();
+                    return options.getDouble("sampleRate") >= Math.abs(randomDouble);
+                }
                 return true;
             }
         });
         logger.info(String.format("startWithDsnString '%s'", dsnString));
+        promise.resolve(true);
     }
 
     @ReactMethod
@@ -159,15 +192,24 @@ public class RNSentryModule extends ReactContextBaseJavaModule {
     @ReactMethod
     public void captureBreadcrumb(ReadableMap breadcrumb) {
         logger.info(String.format("captureEvent '%s'", breadcrumb));
-        if (breadcrumb.hasKey("message")) {
-            Sentry.record(
-                    new BreadcrumbBuilder()
-                            .setMessage(breadcrumb.getString("message"))
-                            .setCategory(breadcrumb.getString("category"))
-                            .setLevel(breadcrumbLevel((ReadableNativeMap)breadcrumb))
-                            .build()
-            );
+
+        BreadcrumbBuilder breadcrumbBuilder = new BreadcrumbBuilder();
+        if (breadcrumb.hasKey("category")) {
+            breadcrumbBuilder.setCategory(breadcrumb.getString("category"));
         }
+        if (breadcrumb.hasKey("data") && breadcrumb.getMap("data") != null) {
+            Map<String, String> newData = new HashMap<>();
+            for (Map.Entry<String, Object> data : ((ReadableNativeMap)breadcrumb.getMap("data")).toHashMap().entrySet()) {
+                newData.put(data.getKey(), data.getValue() != null ? data.getValue().toString() : null);
+            }
+            breadcrumbBuilder.setData(newData);
+        }
+        breadcrumbBuilder.setLevel(breadcrumbLevel((ReadableNativeMap)breadcrumb));
+
+        if (breadcrumb.hasKey("message")) {
+            breadcrumbBuilder.setMessage(breadcrumb.getString("message"));
+        }
+        Sentry.record(breadcrumbBuilder.build());
     }
 
     @ReactMethod
@@ -208,7 +250,8 @@ public class RNSentryModule extends ReactContextBaseJavaModule {
 
         if (castEvent.hasKey("tags")) {
             for (Map.Entry<String, Object> entry : castEvent.getMap("tags").toHashMap().entrySet()) {
-                eventBuilder.withTag(entry.getKey(), entry.getValue().toString());
+                String tagValue = entry.getValue() != null ? entry.getValue().toString() : "INVALID_TAG";
+                eventBuilder.withTag(entry.getKey(), tagValue);
             }
         }
 
@@ -216,7 +259,14 @@ public class RNSentryModule extends ReactContextBaseJavaModule {
             ReadableNativeArray exceptionValues = (ReadableNativeArray)event.getMap("exception").getArray("values");
             ReadableNativeMap exception = exceptionValues.getMap(0);
             ReadableNativeMap stacktrace = exception.getMap("stacktrace");
-            addExceptionInterface(eventBuilder, exception.getString("type"), exception.getString("value"), stacktrace.getArray("frames"));
+            ReadableNativeArray frames = (ReadableNativeArray)stacktrace.getArray("frames");
+            if (exception.hasKey("value")) {
+                addExceptionInterface(eventBuilder, exception.getString("type"), exception.getString("value"), frames);
+            } else {
+                // We use type/type here since this indicates an Unhandled Promise Rejection
+                // https://github.com/getsentry/react-native-sentry/issues/353
+                addExceptionInterface(eventBuilder, exception.getString("type"), exception.getString("type"), frames);
+            }
         }
 
         Sentry.capture(buildEvent(eventBuilder));
@@ -244,6 +294,8 @@ public class RNSentryModule extends ReactContextBaseJavaModule {
         }
         if (user.hasKey("userID")) {
             userBuilder.setId(user.getString("userID"));
+        } else if (user.hasKey("userId")) {
+            userBuilder.setId(user.getString("userId"));
         } else if (user.hasKey("id")) {
             userBuilder.setId(user.getString("id"));
         }
@@ -260,7 +312,7 @@ public class RNSentryModule extends ReactContextBaseJavaModule {
         androidHelper.helpBuildingEvent(eventBuilder);
 
         setRelease(eventBuilder);
-        stripInternalSentry(eventBuilder);
+        eventBuilder.withBreadcrumbs(Sentry.getStoredClient().getContext().getBreadcrumbs());
 
         if (extra != null) {
             for (Map.Entry<String, Object> entry : extra.toHashMap().entrySet()) {
@@ -276,8 +328,11 @@ public class RNSentryModule extends ReactContextBaseJavaModule {
             }
         }
 
-        eventBuilder.withSdkIntegration("react-native");
-        return eventBuilder.build();
+        Event event = eventBuilder.build();
+        Set<String> sdkIntegrations = new HashSet<>();
+        sdkIntegrations.add("sentry-java");
+        event.setSdk(new Sdk(sdkName, versionString, sdkIntegrations));
+        return event;
     }
 
     private static void addExceptionInterface(EventBuilder eventBuilder, String type, String value, ReadableNativeArray stack) {
@@ -371,16 +426,6 @@ public class RNSentryModule extends ReactContextBaseJavaModule {
             }
         }
         return "";
-    }
-
-    private static void stripInternalSentry(EventBuilder eventBuilder) {
-        if (extra != null) {
-            for (Map.Entry<String, Object> entry : extra.toHashMap().entrySet()) {
-                if (entry.getKey().startsWith("__sentry")) {
-                    extra.putNull(entry.getKey());
-                }
-            }
-        }
     }
 
     private static void setRelease(EventBuilder eventBuilder) {

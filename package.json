@@ -2,12 +2,19 @@
   "name": "react-native-sentry",
   "homepage": "https://github.com/getsentry/react-native-sentry",
   "repository": "https://github.com/getsentry/react-native-sentry",
-  "version": "0.14.6",
-  "description": "Official Sentry client for react-native",
+  "version": "0.36.0",
+  "description": "Official Sentry SDK for react-native",
+  "typings": "lib/Sentry.d.ts",
+  "typescript": {
+    "definition": "lib/Sentry.d.ts"
+  },
   "main": "index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "precommit": "lint-staged"
+    "preversion:changelog": "grep -q -F \"## v$npm_package_version\" CHANGELOG.md",
+    "version": "npm run preversion:changelog && node ./scripts/version-bump.js && git add -A",
+    "precommit": "lint-staged",
+    "test:typescript": "node_modules/typescript/bin/tsc --noImplicitAny --allowJs typescript/Sentry-tests.ts"
   },
   "keywords": [
     "react-native",
@@ -21,26 +28,29 @@
     "react-native": ">=0.38.0"
   },
   "dependencies": {
-    "chalk": "^1.1.1",
-    "glob": "7.1.1",
-    "inquirer": "3.0.6",
-    "raven-js": "^3.16.1",
-    "sentry-cli-binary": "^1.16.0",
-    "xcode": "0.9.3"
+    "@sentry/wizard": "^0.9.5",
+    "raven-js": "^3.24.2"
   },
   "rnpm": {
     "commands": {
-      "postlink": "node node_modules/react-native-sentry/scripts/postlink",
-      "postunlink": "node node_modules/react-native-sentry/scripts/postunlink"
+      "postlink": "node node_modules/@sentry/wizard/dist/bin.js -i reactNative -p ios android",
+      "postunlink": "node node_modules/@sentry/wizard/dist/bin.js -i reactNative -p ios android --uninstall"
     },
     "android": {
       "packageInstance": "new RNSentryPackage(MainApplication.this)"
+    },
+    "ios": {
+      "sharedLibraries": [
+        "libz"
+      ]
     }
   },
   "devDependencies": {
-    "husky": "^0.13.4",
-    "lint-staged": "^3.6.0",
-    "prettier": "^1.4.2"
+    "husky": "^0.14.3",
+    "lint-staged": "^7.0.4",
+    "prettier": "^1.12.1",
+    "replace-in-file": "^3.4.0",
+    "typescript": "^2.8.3"
   },
   "lint-staged": {
     "*.js": [
